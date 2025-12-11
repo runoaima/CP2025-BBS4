@@ -165,7 +165,7 @@ function createPostElement(post) {
     // 編集権限を確認
     const canEdit = canEditPost(post);
     // 編集権限があれば、編集・削除機能を表示
-    const actions = !canEdit ? `
+    const actions = canEdit ? `
         <div class="post-actions">
             <button class="btn-edit" onclick="startEdit('${post.id}')">
                 編集
@@ -448,7 +448,7 @@ function updateUI(user) {
     if (user) {
         $('.logged-in').show();
         $('.logged-out').hide();
-        $('#userEmail').text(user.uid);
+        $('#userEmail').text(user.email);
     } else {
         $('.logged-in').hide();
         $('.logged-out').show();
