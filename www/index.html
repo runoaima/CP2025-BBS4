@@ -1,620 +1,291 @@
-<!DOCTYPE HTML>
+<!doctype html>
 <html>
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-    <meta http-equiv="Content-Security-Policy" content="default-src * data: gap: content: https://ssl.gstatic.com; style-src * 'unsafe-inline'; script-src * 'unsafe-inline' 'unsafe-eval'">
-    <script src="cordova.js"></script>
-    <script src="components/loader.js"></script>
-    <link rel="stylesheet" href="components/loader.css">
-    <link rel="stylesheet" href="css/style.css">
+    <head>
+        <meta charset="utf-8" />
+        <meta
+            name="viewport"
+            content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"
+        />
+        <meta
+            http-equiv="Content-Security-Policy"
+            content="default-src * data: gap: content: https://ssl.gstatic.com; style-src * 'unsafe-inline'; script-src * 'unsafe-inline' 'unsafe-eval'"
+        />
+        <script src="cordova.js"></script>
+        <script src="components/loader.js"></script>
+        <link rel="stylesheet" href="components/loader.css" />
+        <link rel="stylesheet" href="css/style.css" />
 
-    <!-- Firebase SDKの読み込み -->
-    <script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-app.js"></script>
-    <script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-database.js"></script>
-    <script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-auth.js"></script>
-    <script src="www/config.js"></script>
-
-    <script>
-let postsRef;
-let postsListener = null;
-// 現在の編集対象のID
-let currentEditId = null;
-// ログイン中のユーザ
-let currentUser = null;
-
-// メッセージ表示処理
-function showMessage(message, type = 'success') {
-    const messageArea = $('#messageArea');
-    messageArea.html(`
-        <div class="message ${type}">
-            ${message}
-        </div>
-    `);
-
-    // 3秒後にメッセージを消す
-    setTimeout(() => {
-        messageArea.empty();
-    }, 3000);
-}
-
-// 認証エラーメッセージの日本語化
-function getAuthErrorMessage(error) {
-    // エラーコードがある場合
-    if (error.code) {
-        return `認証エラーが発生しました（${error.code}）`;
-    } else if (error.message) {
-        return `エラーが発生しました：${error.message}`;
-    } else {
-        return 'エラーが発生しました';
-    }
-}
-
-// 文字数カウントの更新
-function updateCharacterCount(inputId, counterId, maxLength) {
-    const input = $(`#${inputId}`);
-    const counter = $(`#${counterId}`);
-
-    input.on('input', () => {
-        const length = input.val().length;
-        counter.text(`${length}/${maxLength}`);
-
-        if (length > maxLength) {
-            counter.addClass('error');
-        } else {
-            counter.removeClass('error');
-        }
-    });
-}
-
-// 投稿内容のバリデーション
-function validateContent(content) {
-    if (!content || !content.trim()) {
-        showMessage('投稿内容を入力してください', 'error');
-        return false;
-    }
-    if (content.length > 1000) {
-        showMessage('投稿内容は1000文字以内で入力してください', 'error');
-        return false;
-    }
-    return true;
-}
-
-// 認証フォームのバリデーション
-function validateAuthInput(email, password, isRegister = false) {
-    if (!email || !email.trim()) {
-        showMessage('メールアドレスを入力してください', 'error');
-        return false;
-    }
-    if (!password || !password.trim()) {
-        showMessage('パスワードを入力してください', 'error');
-        return false;
-    }
-    if (isRegister && password.length < 6) {
-        showMessage('パスワードは6文字以上にしてください', 'error');
-        return false;
-    }
-    return true;
-}
-
-// 投稿処理
-function createPost(author, content) {
-    if (!currentUser) {
-        showMessage('投稿するにはログインが必要です', 'error');
-        return;
-    }
-
-    if (!validateContent(content)) return;
-
-    const button = $('#postButton');
-    button.prop('disabled', true);
-
-    // author はログインしているユーザのメールアドレスに変更、userId を追加
-    const postData = {
-        author: currentUser.email,
-        content: content,
-        timestamp: firebase.database.ServerValue.TIMESTAMP,
-        userId: currentUser.uid
-    };
-
-    postsRef.push(postData)
-    .then(() => {
-        showMessage('投稿が完了しました！');
-        $('#contentInput').val('');
-        updateCharacterCount('contentInput', 'contentCount', 1000);
-    })
-    .catch((error) => {
-        showMessage('投稿に失敗しました：' + error.message, 'error');
-    })
-    .finally(() => {
-        button.prop('disabled', false);
-    });
-}
-
-// HTMLエスケープ処理
-function escapeHtml(str) {
-    if (!str) return '';
-    return str
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#039;');
-}
-
-// タイムスタンプのフォーマット
-function formatTimestamp(timestamp) {
-    const date = new Date(timestamp);
-    return date.toLocaleString('ja-JP', {
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-        hour: '2-digit',
-        minute: '2-digit'
-    });
-}
-
-// 投稿の編集権限チェック
-function canEditPost(post) {
-    return currentUser && post.userId === currentUser.uid;
-}
-
-// 投稿のHTML要素を生成
-// 　バグ入りなので要修正（編集・削除機能表示判定が誤っている）
-function createPostElement(post) {
-    // 編集権限を確認
-    const canEdit = canEditPost(post);
-    // 編集権限があれば、編集・削除機能を表示
-    const actions = canEdit ? `
-        <div class="post-actions">
-            <button class="btn-edit" onclick="startEdit('${post.id}')">
-                編集
-            </button>
-            <button class="btn-delete" onclick="deletePost('${post.id}')">
-                削除
-            </button>
-        </div>
-    ` : '';
-
-    return `
-        <div class="post" id="post-${post.id}">
-            <div class="post-header">
-                <span class="post-author">${escapeHtml(post.author)}</span>
-                <!-- 編集権限があれば、編集・削除機能を表示 -->
-                ${actions}
+        <!-- Firebase SDKの読み込み -->
+        <script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-app.js"></script>
+        <script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-database.js"></script>
+        <script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-auth.js"></script>
+        <script src="www/config.js"></script>
+    </head>
+    <body>
+        <div class="container">
+            <div class="top-bar">
+                <h1>掲示板アプリ</h1>
+                <div id="userIcon" class="user-icon">👤</div>
             </div>
-            <div class="post-content">${escapeHtml(post.content)}</div>
-            <div class="edit-form">
-                <textarea class="form-control" id="edit-${post.id}"></textarea>
+
+            <!-- メッセージ表示エリア -->
+            <div id="messageArea"></div>
+
+            <!-- 認証フォーム（未ログイン時表示） --
+            <div class="auth-container logged-out">
+                <div class="form-group">
+                    <label for="loginEmail">メールアドレス</label>
+                    <input
+                        type="email"
+                        id="loginEmail"
+                        class="form-control"
+                        placeholder="example@example.com"
+                    />
+                </div>
+                <div class="form-group">
+                    <label for="loginPassword">パスワード</label>
+                    <input
+                        type="password"
+                        id="loginPassword"
+                        class="form-control"
+                        placeholder="6文字以上"
+                    />
+                    <small class="help-text">※新規登録時は6文字以上</small>
+                </div>
                 <div class="button-group">
-                    <button class="btn-primary" onclick="updatePost('${post.id}')">
+                    <button id="loginButton" class="btn-primary">
+                        ログイン
+                    </button>
+                    <button id="registerButton" class="btn-secondary">
+                        新規登録
+                    </button>
+                </div>
+            </div>
+
+            <!-- ログイン情報（ログイン時表示） --
+            <div class="user-info logged-in">
+                <span>ログイン中：<span id="userEmail"></span></span>
+                <button id="logoutButton" class="btn-secondary">
+                    ログアウト
+                </button>
+            </div>
+
+            <!-- 投稿一覧 -->
+            <div class="posts-container">
+                <h2>投稿一覧</h2>
+                <div class="posts-control">
+                    <select id="sortOrder" class="form-control">
+                        <option value="newest">新しい順</option>
+                        <option value="oldest">古い順</option>
+                    </select>
+                </div>
+                <div id="postsList"></div>
+                <div
+                    id="loadingSpinner"
+                    class="loading-spinner"
+                    style="display: none;"
+                >
+                    <div class="spinner"></div>
+                    <p>読み込み中...</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- 編集モーダルウィンドウ -->
+        <div id="editModal" class="modal">
+            <div class="modal-overlay"></div>
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3>投稿を編集</h3>
+                    <button
+                        class="modal-close"
+                        onclick="closeModal('editModal')"
+                    >
+                        &times;
+                    </button>
+                </div>
+                <div class="modal-body">
+                    <div class="form-group">
+                        <textarea
+                            id="editContent"
+                            class="form-control"
+                        ></textarea>
+                        <small class="character-count" id="editContentCount"
+                            >0/1000</small
+                        >
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button onclick="handleUpdate()" class="btn-primary">
                         更新
                     </button>
-                    <button class="btn-cancel" onclick="cancelEdit('${post.id}')">
+                    <button
+                        onclick="closeModal('editModal')"
+                        class="btn-cancel"
+                    >
                         キャンセル
                     </button>
                 </div>
             </div>
-            <div class="post-footer">
-                <span class="post-time">
-                    ${formatTimestamp(post.timestamp)}
-                </span>
-                ${post.updatedAt ? `
-                    <span class="post-updated">
-                        (編集済み: ${formatTimestamp(post.updatedAt)})
-                    </span>
-                ` : ''}
-            </div>
-        </div>
-    `;
-}
-
-// 投稿の表示処理
-function renderPosts(posts) {
-    const postsDiv = $('#postsList');
-    postsDiv.empty();
-
-    if (posts.length === 0) {
-        postsDiv.html('<p class="no-posts">投稿はありません</p>');
-        return;
-    }
-
-    posts.forEach((post) => {
-        postsDiv.append(createPostElement(post));
-    });
-}
-
-// 投稿の読み込み
-function loadPosts() {
-    const sortOrder = $('#sortOrder').val();
-    $('#loadingSpinner').show();
-
-    // 既存のリスナーを解除
-    if (postsListener) {
-        postsRef.off('value', postsListener);
-        postsListener = null;
-    }
-
-    // リスナーを設定
-    postsListener = postsRef.on('value', (snapshot) => {
-        const posts = [];
-        snapshot.forEach((childSnapshot) => {
-            posts.push({
-                id: childSnapshot.key,
-                ...childSnapshot.val()
-            });
-        });
-
-        // 並び順の適用
-        if (sortOrder === 'newest') {
-            posts.sort((a, b) => b.timestamp - a.timestamp);
-        } else {
-            posts.sort((a, b) => a.timestamp - b.timestamp);
-        }
-
-        renderPosts(posts);
-        $('#loadingSpinner').hide();
-    }, (error) => {
-        console.error('Data fetch error:', error);
-        showMessage('データの読み込みに失敗しました', 'error');
-        $('#loadingSpinner').hide();
-    });
-}
-
-// モーダル関連の関数
-function showModal(modalId) {
-    $(`#${modalId}`).fadeIn(200);
-    $('body').addClass('modal-open');
-}
-
-function closeModal(modalId) {
-    $(`#${modalId}`).fadeOut(200);
-    $('body').removeClass('modal-open');
-}
-
-// 更新処理のハンドラ
-function handleUpdate() {
-    if (!currentEditId) return;
-
-    const content = $('#editContent').val();
-    if (!validateContent(content)) return;
-
-    const updates = {
-        content: content,
-        updatedAt: firebase.database.ServerValue.TIMESTAMP
-    };
-
-    postsRef.child(currentEditId).update(updates)
-    .then(() => {
-        showMessage('投稿を更新しました');
-        closeModal('editModal');
-        animateUpdate(currentEditId);
-        currentEditId = null;
-    })
-    .catch((error) => {
-        showMessage('更新に失敗しました：' + error.message, 'error');
-    });
-}
-
-// 削除処理のハンドラ
-function handleDelete() {
-    if (!currentEditId) return;
-
-    const postElement = $(`#post-${currentEditId}`);
-    postElement.addClass('deleting');
-
-    postsRef.child(currentEditId).remove()
-    .then(() => {
-        showMessage('投稿を削除しました');
-        closeModal('deleteModal');
-        currentEditId = null;
-    })
-    .catch((error) => {
-        showMessage('削除に失敗しました：' + error.message, 'error');
-        postElement.removeClass('deleting');
-    });
-}
-
-// モーダルの外側をクリックした時の処理
-$(document).on('click', '.modal-overlay', () => {
-    const modalId = $(this).parent().attr('id');
-    closeModal(modalId);
-});
-
-// ESCキーでモーダルを閉じる
-$(document).on('keydown', (e) => {
-    if (e.key === 'Escape') {
-        $('.modal:visible').each(() => {
-            closeModal(this.id);
-        });
-    }
-});
-
-// 編集の開始
-function startEdit(postId) {
-    currentEditId = postId;
-    const post = $(`#post-${postId}`);
-    const content = post.find('.post-content').text();
-
-    $('#editContent').val(content);
-    updateCharacterCount('editContent', 'editContentCount', 1000);
-    showModal('editModal');
-}
-
-// 編集のキャンセル
-function cancelEdit(postId) {
-    const postElement = $(`#post-${postId}`);
-    postElement.removeClass('editing');
-    postElement.find('textarea').val('');
-}
-
-// 投稿の更新
-function updatePost(postId) {
-    const contentVal = $(`#edit-${postId}`).val();
-    if (!validateContent(contentVal)) return;
-
-    // content の内容を変更し、updatedAt フィールドを付加して、更新後の投稿内容を生成
-    const updates = {
-        content: contentVal,
-        updatedAt: firebase.database.ServerValue.TIMESTAMP
-    };
-
-    postsRef.child(postId).update(updates)
-    .then(() => {
-        showMessage('投稿を更新しました');
-        $(`#post-${postId}`).removeClass('editing');
-        animateUpdate(postId);
-    })
-    .catch((error) => {
-        showMessage('更新に失敗しました：' + error.message, 'error');
-    });
-}
-
-// 投稿の削除
-function deletePost(postId) {
-    currentEditId = postId;
-    showModal('deleteModal');
-}
-
-// 更新時のアニメーション
-function animateUpdate(postId) {
-    const post = $(`#post-${postId}`);
-    post.addClass('updated');
-    setTimeout(() => {
-        post.removeClass('updated');
-    }, 1000);
-}
-
-// ログイン処理
-function login(email, password) {
-    if (!validateAuthInput(email, password)) return;
-
-    const button = $('#loginButton');
-    button.prop('disabled', true);
-
-    firebase.auth().signInWithEmailAndPassword(email, password)
-    .then(() => {
-        showMessage('ログインしました');
-        clearAuthForm();
-    })
-    .catch((error) => {
-        showMessage(getAuthErrorMessage(error), 'error');
-    })
-    .finally(() => {
-        button.prop('disabled', false);
-    });
-}
-
-// 新規登録処理
-function register(email, password) {
-    if (!validateAuthInput(email, password, true)) return;
-
-    const button = $('#registerButton');
-    button.prop('disabled', true);
-
-    firebase.auth().createUserWithEmailAndPassword(email, password)
-    .then(() => {
-        showMessage('アカウントを作成しました');
-        clearAuthForm();
-    })
-    .catch((error) => {
-        showMessage(getAuthErrorMessage(error), 'error');
-    })
-    .finally(() => {
-        button.prop('disabled', false);
-    });
-}
-
-// ログアウト処理
-function logout() {
-    firebase.auth().signOut()
-        .then(() => {
-            showMessage('ログアウトしました');
-        })
-        .catch((error) => {
-            showMessage('ログアウトに失敗しました', 'error');
-        });
-}
-
-// 認証フォームのクリア
-function clearAuthForm() {
-    $('#loginEmail').val('');
-    $('#loginPassword').val('');
-}
-
-// UI更新
-// 　バグ入りなので要修正（emailアドレスを表示するべきところを uid を表示してしまっている）
-function updateUI(user) {
-    if (user) {
-        $('.logged-in').show();
-        $('.logged-out').hide();
-        $('#userEmail').text(user.email);
-    } else {
-        $('.logged-in').hide();
-        $('.logged-out').show();
-        $('#userEmail').text('');
-    }
-}
-
-$(function() {
-    // Firebaseの初期化
-    try {
-        firebase.initializeApp(firebaseConfig);
-        console.log("Firebase initialized successfully");
-        postsRef = firebase.database().ref('posts');
-    } catch (error) {
-        console.error("Firebase initialization error:", error);
-        showMessage('Firebaseの初期化に失敗しました', 'error');
-    }
-
-    // 認証状態の監視
-    firebase.auth().onAuthStateChanged((user) => {
-        currentUser = user;
-        updateUI(user);
-        loadPosts();
-     });
-
-    // 文字数カウンターの初期化
-    updateCharacterCount('contentInput', 'contentCount', 1000);
-
-    // 投稿処理
-    $('#postButton').on('click', () => {
-        // 投稿内容をフォームから取得
-        const authorVal = $('#authorInput').val();
-        const contentVal = $('#contentInput').val();
-        createPost(authorVal, contentVal);
-    });
-
-    $('#loginButton').on('click', () => {
-        const email = $('#loginEmail').val();
-        const password = $('#loginPassword').val();
-        login(email, password);
-    });
-
-    $('#registerButton').on('click', () => {
-        const email = $('#loginEmail').val();
-        const password = $('#loginPassword').val();
-        register(email, password);
-    });
-
-    $('#logoutButton').on('click', logout);
-
-    // 投稿一覧表示順序選択
-    $('#sortOrder').on('change', loadPosts);
-
-    // 投稿一覧の初期読み込み
-    loadPosts();
-});
-
-// クリーンアップ処理
-window.addEventListener('unload', () => {
-    if (postsListener) {
-        postsRef.off('value', postsListener);
-        postsListener = null;
-    }
-});
-    </script>
-</head>
-<body>
-    <div class="container">
-        <h1>掲示板アプリ</h1>
-
-        <!-- メッセージ表示エリア -->
-        <div id="messageArea"></div>
-
-        <!-- 認証フォーム（未ログイン時表示） -->
-        <div class="auth-container logged-out">
-            <div class="form-group">
-                <label for="loginEmail">メールアドレス</label>
-                <input type="email" id="loginEmail"
-                       class="form-control" placeholder="example@example.com">
-            </div>
-            <div class="form-group">
-                <label for="loginPassword">パスワード</label>
-                <input type="password" id="loginPassword"
-                       class="form-control" placeholder="6文字以上">
-                <small class="help-text">※新規登録時は6文字以上</small>
-            </div>
-            <div class="button-group">
-                <button id="loginButton" class="btn-primary">ログイン</button>
-                <button id="registerButton" class="btn-secondary">新規登録</button>
-            </div>
         </div>
 
-        <!-- ログイン情報（ログイン時表示） -->
-        <div class="user-info logged-in">
-            <span>ログイン中：<span id="userEmail"></span></span>
-            <button id="logoutButton" class="btn-secondary">ログアウト</button>
-        </div>
+        <!-- 新規投稿モーダル -->
+        <div id="newPostModal" class="modal">
+            <div class="modal-overlay"></div>
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3>新規投稿</h3>
+                    <button
+                        class="modal-close"
+                        onclick="closeModal('newPostModal')"
+                    >
+                        &times;
+                    </button>
+                </div>
 
-        <!-- 投稿フォーム（ログイン時表示） -->
-        <div class="post-form logged-in">
-            <div class="form-group">
-                <label for="contentInput">投稿内容</label>
-                <textarea id="contentInput" class="form-control"
-                          placeholder="投稿内容を入力してください"></textarea>
-                <small class="character-count" id="contentCount">0/1000</small>
-            </div>
-            <div class="button-group">
-                <button id="postButton" class="btn-primary">投稿する</button>
-            </div>
-        </div>
+                <div class="modal-body">
+                    <div class="form-group">
+                        <textarea
+                            id="modalContentInput"
+                            class="form-control"
+                            placeholder="投稿内容を入力してください"
+                        ></textarea>
+                        <small class="character-count" id="modalContentCount"
+                            >0/1000</small
+                        >
+                    </div>
 
-        <!-- 投稿一覧 -->
-        <div class="posts-container">
-            <h2>投稿一覧</h2>
-            <div class="posts-control">
-                <select id="sortOrder" class="form-control">
-                    <option value="newest">新しい順</option>
-                    <option value="oldest">古い順</option>
-                </select>
-            </div>
-            <div id="postsList"></div>
-            <div id="loadingSpinner" class="loading-spinner" style="display: none;">
-                <div class="spinner"></div>
-                <p>読み込み中...</p>
-            </div>
-        </div>
-    </div>
+                    <div class="form-group">
+                        <input type="file" id="imageInput" accept="image/*" />
+                    </div>
+                </div>
 
-    <!-- 編集モーダルウィンドウ -->
-    <div id="editModal" class="modal">
-        <div class="modal-overlay"></div>
-        <div class="modal-content">
-            <div class="modal-header">
-                <h3>投稿を編集</h3>
-                <button class="modal-close" onclick="closeModal('editModal')">&times;</button>
-            </div>
-            <div class="modal-body">
-                <div class="form-group">
-                    <textarea id="editContent" class="form-control"></textarea>
-                    <small class="character-count" id="editContentCount">0/1000</small>
+                <div class="modal-footer">
+                    <button id="modalPostButton" class="btn-primary">
+                        投稿
+                    </button>
+                    <button
+                        onclick="closeModal('newPostModal')"
+                        class="btn-cancel"
+                    >
+                        キャンセル
+                    </button>
                 </div>
             </div>
-            <div class="modal-footer">
-                <button onclick="handleUpdate()" class="btn-primary">更新</button>
-                <button onclick="closeModal('editModal')" class="btn-cancel">キャンセル</button>
-            </div>
         </div>
-    </div>
 
-    <!-- 削除確認モーダルウィンドウ -->
-    <div id="deleteModal" class="modal">
-        <div class="modal-overlay"></div>
-        <div class="modal-content">
-            <div class="modal-header">
-                <h3>投稿の削除</h3>
-                <button class="modal-close" onclick="closeModal('deleteModal')">&times;</button>
-            </div>
-            <div class="modal-body">
-                <p>この投稿を削除してもよろしいですか？</p>
-                <p class="text-danger">この操作は取り消せません。</p>
-            </div>
-            <div class="modal-footer">
-                <button onclick="handleDelete()" class="btn-danger">削除</button>
-                <button onclick="closeModal('deleteModal')" class="btn-cancel">キャンセル</button>
+        <!-- ログイン / 新規登録モーダル -->
+        <div id="authModal" class="modal">
+            <div class="modal-overlay"></div>
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3>ログイン / 新規登録</h3>
+                    <button
+                        class="modal-close"
+                        onclick="closeModal('authModal')"
+                    >
+                        &times;
+                    </button>
+                </div>
+
+                <div class="modal-body" id="authModalBody">
+                    <div class="auth-container logged-out">
+                        <div class="form-group">
+                            <label for="loginEmail">メールアドレス</label>
+                            <input
+                                type="email"
+                                id="loginEmail"
+                                class="form-control"
+                                placeholder="example@example.com"
+                            />
+                        </div>
+                        <div class="form-group">
+                            <label for="loginPassword">パスワード</label>
+                            <input
+                                type="password"
+                                id="loginPassword"
+                                class="form-control"
+                                placeholder="6文字以上"
+                            />
+                            <small class="help-text"
+                                >※新規登録時は6文字以上</small
+                            >
+                        </div>
+                        <div class="button-group">
+                            <button id="loginButton" class="btn-primary">
+                                ログイン
+                            </button>
+                            <button id="registerButton" class="btn-secondary">
+                                新規登録
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- ログイン情報（ログイン時表示） -->
+                    <div class="user-info logged-in">
+                        <span>ログイン中：<span id="userEmail"></span></span>
+                        <button id="logoutButton" class="btn-secondary">
+                            ログアウト
+                        </button>
+                    </div>
+                </div>
             </div>
         </div>
-    </div>
-</body>
+
+        <div id="profileModal" class="modal">
+            <div class="modal-overlay"></div>
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3>プロフィール</h3>
+                    <button
+                        class="modal-close"
+                        onclick="closeModal('profileModal')"
+                    >
+                        &times;
+                    </button>
+                </div>
+
+                <div class="user-info logged-in">
+                    <span>ログイン中：<span id="userEmail"></span></span>
+                    <button id="logoutButton" class="btn-secondary">
+                        ログアウト
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- 削除確認モーダルウィンドウ -->
+        <div id="deleteModal" class="modal">
+            <div class="modal-overlay"></div>
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3>投稿の削除</h3>
+                    <button
+                        class="modal-close"
+                        onclick="closeModal('deleteModal')"
+                    >
+                        &times;
+                    </button>
+                </div>
+                <div class="modal-body">
+                    <p>この投稿を削除してもよろしいですか？</p>
+                    <p class="text-danger">この操作は取り消せません。</p>
+                </div>
+                <div class="modal-footer">
+                    <button onclick="handleDelete()" class="btn-danger">
+                        削除
+                    </button>
+                    <button
+                        onclick="closeModal('deleteModal')"
+                        class="btn-cancel"
+                    >
+                        キャンセル
+                    </button>
+                </div>
+            </div>
+        </div>
+        <button id="floatingPostBtn" class="floating-post-btn">＋</button>
+
+        <script src="www/js/main.js"></script>
+    </body>
 </html>
